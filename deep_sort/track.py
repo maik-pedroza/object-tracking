@@ -1,5 +1,8 @@
 # vim: expandtab:ts=4:sw=4
 
+import numpy as np
+from collections import deque
+
 
 class TrackState:
     """
@@ -64,7 +67,9 @@ class Track:
     """
 
     def __init__(self, mean, covariance, track_id, n_init, max_age,
-                 feature=None):
+                 feature=None,
+                 buffer_size: int = 30,
+                 ema_alpha: float = 0.1):
         self.mean = mean
         self.covariance = covariance
         self.track_id = track_id
@@ -73,9 +78,28 @@ class Track:
         self.time_since_update = 0
 
         self.state = TrackState.Tentative
+
+        # --- Re-identification buffer -----------------------------------
+        # Keep a rolling history of appearance embeddings for multi-frame
+        # fusion.  ``embedding_buffer`` has fixed length ``buffer_size``.
+        # ``smoothed_feature`` keeps an exponential moving average (EMA)
+        # that will be used by the distance metric, providing a single
+        # fused descriptor per track.
+        self.embedding_buffer = deque(maxlen=buffer_size)
+        self.smoothed_feature = None  # type: np.ndarray | None
+
+        # Features pushed each frame and later consumed by Tracker to update
+        # the global metric.
         self.features = []
+
         if feature is not None:
-            self.features.append(feature)
+            feature = np.asarray(feature, dtype=np.float32)
+            self.embedding_buffer.append(feature)
+            self.smoothed_feature = feature
+            self.features.append(self.smoothed_feature)
+
+        # EMA smoothing hyper-parameter.
+        self._ema_alpha = ema_alpha
 
         self._n_init = n_init
         self._max_age = max_age
@@ -135,9 +159,31 @@ class Track:
             The associated detection.
 
         """
+        # --------------------------------------------------------------
+        # Update appearance buffer and smoothed descriptor
+        # --------------------------------------------------------------
+        new_feat = np.asarray(detection.feature, dtype=np.float32)
+        self.embedding_buffer.append(new_feat)
+
+        if self.smoothed_feature is None:
+            self.smoothed_feature = new_feat
+        else:
+            # Exponential Moving Average fusion
+            self.smoothed_feature = (
+                (1.0 - self._ema_alpha) * self.smoothed_feature
+                + self._ema_alpha * new_feat
+            )
+
+        # L2-normalize to keep cosine distances meaningful
+        norm = np.linalg.norm(self.smoothed_feature)
+        if norm > 0:
+            self.smoothed_feature = self.smoothed_feature / norm
+
+        # Use the fused descriptor for metric update
+        self.features.append(self.smoothed_feature)
+
         self.mean, self.covariance = kf.update(
             self.mean, self.covariance, detection.to_xyah())
-        self.features.append(detection.feature)
 
         self.hits += 1
         self.time_since_update = 0

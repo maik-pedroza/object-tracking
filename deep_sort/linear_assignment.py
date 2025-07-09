@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from . import kalman_filter
+import math
 
 
 INFTY_COST = 1e+5
@@ -142,8 +143,15 @@ def matching_cascade(
 
 
 def gate_cost_matrix(
-        kf, cost_matrix, tracks, detections, track_indices, detection_indices,
-        gated_cost=INFTY_COST, only_position=False):
+        kf,
+        cost_matrix,
+        tracks,
+        detections,
+        track_indices,
+        detection_indices,
+        gated_cost=INFTY_COST,
+        only_position=False,
+        alpha: float = 0.0):
     """Invalidate infeasible entries in cost matrix based on the state
     distributions obtained by Kalman filtering.
 
@@ -179,11 +187,21 @@ def gate_cost_matrix(
 
     """
     gating_dim = 2 if only_position else 4
-    gating_threshold = kalman_filter.chi2inv95[gating_dim]
-    measurements = np.asarray(
-        [detections[i].to_xyah() for i in detection_indices])
+    base_threshold = kalman_filter.chi2inv95[gating_dim]
+
+    measurements = np.asarray([detections[i].to_xyah() for i in detection_indices])
+
     for row, track_idx in enumerate(track_indices):
         track = tracks[track_idx]
+
+        # --------------------------------------------------------------
+        # Adaptive scaling based on normalized speed
+        # --------------------------------------------------------------
+        vx, vy = track.mean[4], track.mean[5] if len(track.mean) >= 6 else (0.0, 0.0)
+        speed = math.hypot(vx, vy)
+        scale = 1.0 + alpha * (speed / (track.mean[3] + 1e-6))  # normalize by height
+        gating_threshold = base_threshold * scale
+
         gating_distance = kf.gating_distance(
             track.mean, track.covariance, measurements, only_position)
         cost_matrix[row, gating_distance > gating_threshold] = gated_cost

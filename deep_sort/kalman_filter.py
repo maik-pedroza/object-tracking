@@ -37,20 +37,54 @@ class KalmanFilter(object):
 
     """
 
-    def __init__(self):
-        ndim, dt = 4, 1.
+    def __init__(self, dt: float = 1.0):
+        """Create a Kalman filter for bounding boxes.
 
-        # Create Kalman filter model matrices.
-        self._motion_mat = np.eye(2 * ndim, 2 * ndim)
-        for i in range(ndim):
-            self._motion_mat[i, ndim + i] = dt
+        Parameters
+        ----------
+        dt : float, optional
+            Initial time delta between consecutive frames (in frames). If
+            your input stream has variable frame-rate you can update it later
+            via :py:meth:`set_time_delta`.
+        """
+
+        ndim = 4  # dimensionality of the measurement space (x, y, a, h)
+        self._ndim = ndim
+
+        # Store time step and build motion matrix
+        self._dt = dt
+        self._build_motion_matrix()
+
+        # Observation matrix (maps state space to measurement space)
         self._update_mat = np.eye(ndim, 2 * ndim)
 
         # Motion and observation uncertainty are chosen relative to the current
         # state estimate. These weights control the amount of uncertainty in
-        # the model. This is a bit hacky.
-        self._std_weight_position = 1. / 20
-        self._std_weight_velocity = 1. / 160
+        # the model. This is a bit hacky.  We scale by dt so that uncertainty
+        # grows with the square of elapsed time.
+        self._base_std_weight_position = 1.0 / 20
+        self._base_std_weight_velocity = 1.0 / 160
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+    def _build_motion_matrix(self):
+        """Construct the motion matrix using the current dt."""
+        ndim = self._ndim
+        self._motion_mat = np.eye(2 * ndim, 2 * ndim)
+        for i in range(ndim):
+            self._motion_mat[i, ndim + i] = self._dt
+
+    def set_time_delta(self, dt: float):
+        """Update the internal time delta and rebuild motion matrix."""
+        if dt <= 0:
+            raise ValueError("dt must be positive")
+        self._dt = dt
+        self._build_motion_matrix()
+
+    # ------------------------------------------------------------------
+    # Core Kalman operations
+    # ------------------------------------------------------------------
 
     def initiate(self, measurement):
         """Create track from unassociated measurement.
@@ -74,14 +108,14 @@ class KalmanFilter(object):
         mean = np.r_[mean_pos, mean_vel]
 
         std = [
-            2 * self._std_weight_position * measurement[3],
-            2 * self._std_weight_position * measurement[3],
+            2 * self._base_std_weight_position * measurement[3],
+            2 * self._base_std_weight_position * measurement[3],
             1e-2,
-            2 * self._std_weight_position * measurement[3],
-            10 * self._std_weight_velocity * measurement[3],
-            10 * self._std_weight_velocity * measurement[3],
+            2 * self._base_std_weight_position * measurement[3],
+            10 * self._base_std_weight_velocity * measurement[3],
+            10 * self._base_std_weight_velocity * measurement[3],
             1e-5,
-            10 * self._std_weight_velocity * measurement[3]]
+            10 * self._base_std_weight_velocity * measurement[3]]
         covariance = np.diag(np.square(std))
         return mean, covariance
 
@@ -105,15 +139,15 @@ class KalmanFilter(object):
 
         """
         std_pos = [
-            self._std_weight_position * mean[3],
-            self._std_weight_position * mean[3],
+            self._base_std_weight_position * mean[3],
+            self._base_std_weight_position * mean[3],
             1e-2,
-            self._std_weight_position * mean[3]]
+            self._base_std_weight_position * mean[3]]
         std_vel = [
-            self._std_weight_velocity * mean[3],
-            self._std_weight_velocity * mean[3],
+            self._base_std_weight_velocity * mean[3],
+            self._base_std_weight_velocity * mean[3],
             1e-5,
-            self._std_weight_velocity * mean[3]]
+            self._base_std_weight_velocity * mean[3]]
         motion_cov = np.diag(np.square(np.r_[std_pos, std_vel]))
 
         mean = np.dot(self._motion_mat, mean)
@@ -140,10 +174,10 @@ class KalmanFilter(object):
 
         """
         std = [
-            self._std_weight_position * mean[3],
-            self._std_weight_position * mean[3],
+            self._base_std_weight_position * mean[3],
+            self._base_std_weight_position * mean[3],
             1e-1,
-            self._std_weight_position * mean[3]]
+            self._base_std_weight_position * mean[3]]
         innovation_cov = np.diag(np.square(std))
 
         mean = np.dot(self._update_mat, mean)
